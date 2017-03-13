@@ -16,6 +16,7 @@ package org.odk.collect.android.activities;
 
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.database.Cursor;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.util.Log;
@@ -24,13 +25,20 @@ import android.view.View.OnClickListener;
 import android.widget.Button;
 import android.widget.ListView;
 import android.widget.SimpleCursorAdapter;
-import android.widget.Toast;
+import android.widget.TextView;
 
 import org.odk.collect.android.R;
 import org.odk.collect.android.dao.InstancesDao;
 import org.odk.collect.android.listeners.DeleteInstancesListener;
+import org.odk.collect.android.listeners.DiskSyncListener;
+import org.odk.collect.android.provider.InstanceProviderAPI;
 import org.odk.collect.android.provider.InstanceProviderAPI.InstanceColumns;
 import org.odk.collect.android.tasks.DeleteInstancesTask;
+import org.odk.collect.android.utilities.ToastUtils;
+import org.odk.collect.android.tasks.InstanceSyncTask;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Responsible for displaying and deleting all the saved form instances
@@ -39,13 +47,15 @@ import org.odk.collect.android.tasks.DeleteInstancesTask;
  * @author Carl Hartung (carlhartung@gmail.com)
  * @author Yaw Anokwa (yanokwa@gmail.com)
  */
-public class DataManagerList extends AppListActivity implements DeleteInstancesListener {
+public class DataManagerList extends InstanceListActivity
+        implements DeleteInstancesListener, DiskSyncListener {
     private static final String t = "DataManagerList";
     private AlertDialog mAlertDialog;
     private Button mDeleteButton;
     private Button mToggleButton;
 
     DeleteInstancesTask mDeleteInstancesTask = null;
+    private InstanceSyncTask instanceSyncTask;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -62,8 +72,7 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
                 if (checkedItemCount > 0) {
                     createDeleteInstancesDialog();
                 } else {
-                    Toast.makeText(getApplicationContext(),
-                            R.string.noselect_error, Toast.LENGTH_SHORT).show();
+                    ToastUtils.showShortToast(R.string.noselect_error);
                 }
             }
         });
@@ -80,13 +89,8 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
             }
         });
 
-        String[] data = new String[]{InstanceColumns.DISPLAY_NAME,
-                InstanceColumns.DISPLAY_SUBTEXT};
-        int[] view = new int[]{R.id.text1, R.id.text2};
-
-        SimpleCursorAdapter cursorAdapter = new SimpleCursorAdapter(this,
-                R.layout.two_item_multiple_choice, new InstancesDao().getSavedInstancesCursor(), data, view);
-        setListAdapter(cursorAdapter);
+        setupAdapter(InstanceProviderAPI.InstanceColumns.DISPLAY_NAME + " ASC");
+        
         getListView().setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
         getListView().setItemsCanFocus(false);
         mDeleteButton.setEnabled(false);
@@ -96,6 +100,15 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
         if (getListView().getCount() == 0) {
             mToggleButton.setEnabled(false);
         }
+
+        instanceSyncTask = new InstanceSyncTask();
+        instanceSyncTask.setDiskSyncListener(this);
+        instanceSyncTask.execute();
+
+        mSortingOptions = new String[]{
+                getString(R.string.sort_by_name_asc), getString(R.string.sort_by_name_desc),
+                getString(R.string.sort_by_date_asc), getString(R.string.sort_by_date_desc)
+        };
     }
 
     @Override
@@ -129,6 +142,9 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
         if (mDeleteInstancesTask != null) {
             mDeleteInstancesTask.setDeleteListener(this);
         }
+        if (instanceSyncTask != null) {
+            instanceSyncTask.setDiskSyncListener(this);
+        }
         super.onResume();
         // async task may have completed while we were reorienting...
         if (mDeleteInstancesTask != null
@@ -142,10 +158,35 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
         if (mDeleteInstancesTask != null) {
             mDeleteInstancesTask.setDeleteListener(null);
         }
+        if (instanceSyncTask != null) {
+            instanceSyncTask.setDiskSyncListener(null);
+        }
         if (mAlertDialog != null && mAlertDialog.isShowing()) {
             mAlertDialog.dismiss();
         }
         super.onPause();
+    }
+
+    @Override
+    public void syncComplete(String result) {
+        TextView textView = (TextView) findViewById(R.id.status_text);
+        textView.setText(result);
+    }
+
+    @Override
+    protected void setupAdapter(String sortOrder) {
+        List<Long> checkedInstances = new ArrayList();
+        for (long a : getListView().getCheckedItemIds()) {
+            checkedInstances.add(a);
+        }
+        String[] data = new String[]{InstanceColumns.DISPLAY_NAME, InstanceColumns.DISPLAY_SUBTEXT};
+        int[] view = new int[]{R.id.text1, R.id.text2};
+
+        Cursor cursor = new InstancesDao().getSavedInstancesCursor(sortOrder);
+        SimpleCursorAdapter cursorAdapter = new SimpleCursorAdapter(this,
+                R.layout.two_item_multiple_choice, cursor, data, view);
+        setListAdapter(cursorAdapter);
+        checkPreviouslyCheckedItems(checkedInstances, cursor);
     }
 
     /**
@@ -198,8 +239,7 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
             mDeleteInstancesTask.setDeleteListener(this);
             mDeleteInstancesTask.execute(getCheckedIdObjects());
         } else {
-            Toast.makeText(this, getString(R.string.file_delete_in_progress),
-                    Toast.LENGTH_LONG).show();
+            ToastUtils.showLongToast(R.string.file_delete_in_progress);
         }
     }
 
@@ -216,22 +256,18 @@ public class DataManagerList extends AppListActivity implements DeleteInstancesL
         Log.i(t, "Delete instances complete");
         logger.logAction(this, "deleteComplete",
                 Integer.toString(deletedInstances));
-        final int checkedCount = getCheckedCount();
-        if (deletedInstances == checkedCount) {
+        final int toDeleteCount = mDeleteInstancesTask.getToDeleteCount();
+
+        if (deletedInstances == toDeleteCount) {
             // all deletes were successful
-            Toast.makeText(this,
-                    getString(R.string.file_deleted_ok, String.valueOf(deletedInstances)),
-                    Toast.LENGTH_SHORT).show();
+            ToastUtils.showShortToast(getString(R.string.file_deleted_ok, String.valueOf(deletedInstances)));
         } else {
             // had some failures
             Log.e(t, "Failed to delete "
-                    + (checkedCount - deletedInstances) + " instances");
-            Toast.makeText(
-                    this,
-                    getString(R.string.file_deleted_error,
-                            String.valueOf(checkedCount - deletedInstances),
-                            String.valueOf(checkedCount)),
-                    Toast.LENGTH_LONG).show();
+                    + (toDeleteCount - deletedInstances) + " instances");
+            ToastUtils.showLongToast(getString(R.string.file_deleted_error,
+                            String.valueOf(toDeleteCount - deletedInstances),
+                            String.valueOf(toDeleteCount)));
         }
         mDeleteInstancesTask = null;
         getListView().clearChoices(); // doesn't unset the checkboxes

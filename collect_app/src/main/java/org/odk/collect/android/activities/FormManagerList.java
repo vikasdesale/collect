@@ -26,17 +26,19 @@ import android.widget.Button;
 import android.widget.ListView;
 import android.widget.SimpleCursorAdapter;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import org.odk.collect.android.R;
-import org.odk.collect.android.application.Collect;
 import org.odk.collect.android.dao.FormsDao;
 import org.odk.collect.android.listeners.DeleteFormsListener;
 import org.odk.collect.android.listeners.DiskSyncListener;
 import org.odk.collect.android.provider.FormsProviderAPI.FormsColumns;
 import org.odk.collect.android.tasks.DeleteFormsTask;
 import org.odk.collect.android.tasks.DiskSyncTask;
+import org.odk.collect.android.utilities.ToastUtils;
 import org.odk.collect.android.utilities.VersionHidingCursorAdapter;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Responsible for displaying and deleting all the valid forms in the forms
@@ -45,7 +47,7 @@ import org.odk.collect.android.utilities.VersionHidingCursorAdapter;
  * @author Carl Hartung (carlhartung@gmail.com)
  * @author Yaw Anokwa (yanokwa@gmail.com)
  */
-public class FormManagerList extends AppListActivity implements DiskSyncListener,
+public class FormManagerList extends FormListActivity implements DiskSyncListener,
         DeleteFormsListener {
     private static String t = "FormManagerList";
     private static final String syncMsgKey = "syncmsgkey";
@@ -82,8 +84,7 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
                 if (areCheckedItems()) {
                     createDeleteFormsDialog();
                 } else {
-                    Toast.makeText(getApplicationContext(),
-                            R.string.noselect_error, Toast.LENGTH_SHORT).show();
+                    ToastUtils.showShortToast(R.string.noselect_error);
                 }
             }
         });
@@ -99,17 +100,8 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
                 }
         });
 
-        String sortOrder = FormsColumns.DISPLAY_NAME + " ASC, " + FormsColumns.JR_VERSION + " DESC";
-        Cursor c = new FormsDao().getFormsCursor(sortOrder);
+        setupAdapter(FormsColumns.DISPLAY_NAME + " ASC, " + FormsColumns.JR_VERSION + " DESC");
 
-        String[] data = new String[]{FormsColumns.DISPLAY_NAME,
-                FormsColumns.DISPLAY_SUBTEXT, FormsColumns.JR_VERSION};
-        int[] view = new int[]{R.id.text1, R.id.text2, R.id.text3};
-
-        // render total instance view
-        SimpleCursorAdapter cursorAdapter = new VersionHidingCursorAdapter(FormsColumns.JR_VERSION, this,
-                R.layout.two_item_multiple_choice, c, data, view);
-        setListAdapter(cursorAdapter);
         getListView().setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
         getListView().setItemsCanFocus(false);
         mDeleteButton.setEnabled(false);
@@ -131,6 +123,11 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
             mBackgroundTasks.mDiskSyncTask.setDiskSyncListener(this);
             mBackgroundTasks.mDiskSyncTask.execute((Void[]) null);
         }
+
+        mSortingOptions = new String[]{
+                getString(R.string.sort_by_name_asc), getString(R.string.sort_by_name_desc),
+                getString(R.string.sort_by_date_asc), getString(R.string.sort_by_date_desc)
+        };
     }
 
     @Override
@@ -174,7 +171,7 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
         super.onResume();
         // async task may have completed while we were reorienting...
         if (mBackgroundTasks.mDiskSyncTask.getStatus() == AsyncTask.Status.FINISHED) {
-            SyncComplete(mBackgroundTasks.mDiskSyncTask.getStatusMessage());
+            syncComplete(mBackgroundTasks.mDiskSyncTask.getStatusMessage());
         }
         if (mBackgroundTasks.mDeleteFormsTask != null
                 && mBackgroundTasks.mDeleteFormsTask.getStatus() == AsyncTask.Status.FINISHED) {
@@ -193,6 +190,23 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
         }
 
         super.onPause();
+    }
+
+    @Override
+    protected void setupAdapter(String sortOrder) {
+        List<Long> checkedForms = new ArrayList();
+        for (long a : getListView().getCheckedItemIds()) {
+            checkedForms.add(a);
+        }
+        Cursor c = new FormsDao().getFormsCursor(sortOrder);
+        String[] data = new String[]{FormsColumns.DISPLAY_NAME, FormsColumns.DISPLAY_SUBTEXT, FormsColumns.JR_VERSION};
+        int[] view = new int[]{R.id.text1, R.id.text2, R.id.text3};
+
+        // render total instance view
+        SimpleCursorAdapter cursorAdapter = new VersionHidingCursorAdapter(FormsColumns.JR_VERSION, this,
+                R.layout.two_item_multiple_choice, c, data, view);
+        setListAdapter(cursorAdapter);
+        checkPreviouslyCheckedItems(checkedForms, c);
     }
 
     /**
@@ -243,8 +257,7 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
             mBackgroundTasks.mDeleteFormsTask.setDeleteListener(this);
             mBackgroundTasks.mDeleteFormsTask.execute(getCheckedIdObjects());
         } else {
-            Toast.makeText(this, getString(R.string.file_delete_in_progress),
-                    Toast.LENGTH_LONG).show();
+            ToastUtils.showLongToast(R.string.file_delete_in_progress);
         }
     }
 
@@ -257,7 +270,7 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
     }
 
     @Override
-    public void SyncComplete(String result) {
+    public void syncComplete(String result) {
         Log.i(t, "Disk scan complete");
         TextView tv = (TextView) findViewById(R.id.status_text);
         tv.setText(result);
@@ -267,19 +280,16 @@ public class FormManagerList extends AppListActivity implements DiskSyncListener
     public void deleteComplete(int deletedForms) {
         Log.i(t, "Delete forms complete");
         logger.logAction(this, "deleteComplete", Integer.toString(deletedForms));
-        if (deletedForms == getCheckedCount()) {
+        final int toDeleteCount = mBackgroundTasks.mDeleteFormsTask.getToDeleteCount();
+
+        if (deletedForms == toDeleteCount) {
             // all deletes were successful
-            Toast.makeText(getApplicationContext(),
-                    getString(R.string.file_deleted_ok, String.valueOf(deletedForms)),
-                    Toast.LENGTH_SHORT).show();
+            ToastUtils.showShortToast(getString(R.string.file_deleted_ok, String.valueOf(deletedForms)));
         } else {
             // had some failures
-            Log.e(t, "Failed to delete " + (getCheckedCount() - deletedForms) + " forms");
-            Toast.makeText(
-                    getApplicationContext(),
-                    getString(R.string.file_deleted_error, String.valueOf(getCheckedCount()
-                            - deletedForms), String.valueOf(getCheckedCount())),
-                    Toast.LENGTH_LONG).show();
+            Log.e(t, "Failed to delete " + (toDeleteCount - deletedForms) + " forms");
+            ToastUtils.showLongToast(getString(R.string.file_deleted_error, String.valueOf(getCheckedCount()
+                            - deletedForms), String.valueOf(getCheckedCount())));
         }
         mBackgroundTasks.mDeleteFormsTask = null;
         getListView().clearChoices(); // doesn't unset the checkboxes
