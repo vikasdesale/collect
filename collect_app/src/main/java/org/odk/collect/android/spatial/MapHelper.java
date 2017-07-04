@@ -81,25 +81,6 @@ public class MapHelper {
     private org.odk.collect.android.spatial.TileSourceFactory tileFactory;
 
 
-<<<<<<< HEAD
-    public MapHelper(Context pContext, GoogleMap pGoogleMap) {
-        MapHelper.mGoogleMap = null;
-        MapHelper.mOsmMap = null;
-        sharedPreferences = PreferenceManager.getDefaultSharedPreferences(pContext);
-        offilineOverlays = getOfflineLayerList();
-        MapHelper.mGoogleMap = pGoogleMap;
-        tileFactory = new org.odk.collect.android.spatial.TileSourceFactory(pContext);
-    }
-
-    public MapHelper(Context pContext, MapView pOsmMap, IRegisterReceiver pIregisterReceiver) {
-        MapHelper.mGoogleMap = null;
-        MapHelper.mOsmMap = null;
-        sharedPreferences = PreferenceManager.getDefaultSharedPreferences(pContext);
-        offilineOverlays = getOfflineLayerList();
-        iRegisterReceiver = pIregisterReceiver;
-        MapHelper.mOsmMap = pOsmMap;
-        tileFactory = new org.odk.collect.android.spatial.TileSourceFactory(pContext);
-=======
     public MapHelper(Context context, GoogleMap googleMap) {
         this.googleMap = null;
         osmMap = null;
@@ -117,7 +98,6 @@ public class MapHelper {
         this.iregisterReceiver = iregisterReceiver;
         this.osmMap = osmMap;
         tileFactory = new org.odk.collect.android.spatial.TileSourceFactory(context);
->>>>>>> upstream/master
     }
 
     private static String getGoogleBasemap() {

@@ -62,13 +62,8 @@ import java.util.concurrent.TimeUnit;
 public class GeoTraceOsmMapActivity extends Activity implements IRegisterReceiver,
         LocationListener {
     private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-<<<<<<< HEAD
-    private ScheduledFuture<?> schedulerHandler;
-    public int zoom_level = 3;
-=======
     private ScheduledFuture schedulerHandler;
     public int zoomLevel = 3;
->>>>>>> upstream/master
     public Boolean gpsStatus = true;
     private Boolean playCheck = false;
     private MapView mapView;
