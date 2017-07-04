@@ -88,8 +88,9 @@ public class AuthDialogUtility {
         String username = getUserName(settings);
         String password = getPassword(settings);
 
-        if (username == null || username.isEmpty())
+        if (username == null || username.isEmpty()) {
             return;
+        }
 
         String host = Uri.parse(getServer(settings, context)).getHost();
         WebUtils.addCredentials(username, password, host);
@@ -113,11 +114,12 @@ public class AuthDialogUtility {
                 .edit()
                 .putString(PreferenceKeys.KEY_USERNAME, userName)
                 .putString(PreferenceKeys.KEY_PASSWORD, password)
-                .commit();
+                .apply();
     }
 
     public interface AuthDialogUtilityResultListener {
         void updatedCredentials();
+
         void cancelledUpdatingCredentials();
     }
 }

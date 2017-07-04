@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Nafundi
+ * Copyright (C) 2017 Nafundi
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -20,69 +20,89 @@
 
 package org.odk.collect.android.activities;
 
-import android.app.Activity;
+import android.Manifest;
+import android.accounts.AccountManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.ProgressDialog;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
-import android.util.Log;
+import android.support.annotation.NonNull;
+import android.support.v7.app.AppCompatActivity;
 
 import com.google.android.gms.auth.GoogleAuthException;
-import com.google.android.gms.auth.GooglePlayServicesAvailabilityException;
+import com.google.android.gms.auth.GoogleAuthUtil;
 import com.google.android.gms.auth.UserRecoverableAuthException;
-import com.google.android.gms.common.GooglePlayServicesUtil;
+import com.google.api.client.extensions.android.http.AndroidHttp;
+import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential;
+import com.google.api.client.http.HttpTransport;
+import com.google.api.client.json.JsonFactory;
+import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.util.ExponentialBackOff;
+import com.google.api.services.drive.DriveScopes;
 
 import org.odk.collect.android.R;
 import org.odk.collect.android.application.Collect;
 import org.odk.collect.android.dao.InstancesDao;
+import org.odk.collect.android.exception.MultipleFoldersFoundException;
 import org.odk.collect.android.listeners.InstanceUploaderListener;
 import org.odk.collect.android.preferences.PreferenceKeys;
 import org.odk.collect.android.provider.InstanceProviderAPI.InstanceColumns;
 import org.odk.collect.android.tasks.GoogleSheetsAbstractUploader;
-import org.odk.collect.android.tasks.GoogleSheetsTask;
+import org.odk.collect.android.utilities.ToastUtils;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 
-public class GoogleSheetsUploaderActivity extends Activity implements InstanceUploaderListener {
-    private final static String TAG = "SheetsUploaderActivity";
+import pub.devrel.easypermissions.AfterPermissionGranted;
+import pub.devrel.easypermissions.EasyPermissions;
+import timber.log.Timber;
 
-    private final static int PROGRESS_DIALOG = 1;
-    private final static int GOOGLE_USER_DIALOG = 3;
+import static org.odk.collect.android.tasks.GoogleSheetsAbstractUploader.REQUEST_ACCOUNT_PICKER;
+import static org.odk.collect.android.tasks.GoogleSheetsAbstractUploader.REQUEST_AUTHORIZATION;
+import static org.odk.collect.android.tasks.GoogleSheetsAbstractUploader.REQUEST_PERMISSION_GET_ACCOUNTS;
 
+
+public class GoogleSheetsUploaderActivity extends AppCompatActivity implements InstanceUploaderListener,
+        EasyPermissions.PermissionCallbacks {
+    private static final int PROGRESS_DIALOG = 1;
+    private static final int GOOGLE_USER_DIALOG = 3;
     private static final String ALERT_MSG = "alertmsg";
     private static final String ALERT_SHOWING = "alertshowing";
-
-    private ProgressDialog mProgressDialog;
-    private AlertDialog mAlertDialog;
-
-    private String mAlertMsg;
-    private boolean mAlertShowing;
-
-    private Long[] mInstancesToSend;
-
-    private GoogleSheetsInstanceUploaderTask mUlTask;
+    protected GoogleAccountCredential credential;
+    private ProgressDialog progressDialog;
+    private AlertDialog alertDialog;
+    private String alertMsg;
+    private boolean alertShowing;
+    private boolean authFailed;
+    private Long[] instancesToSend;
+    private GoogleSheetsInstanceUploaderTask uiTask;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        Log.i(TAG, "onCreate: " + ((savedInstanceState == null) ? "creating" : "re-initializing"));
+        Timber.i("onCreate: %s", ((savedInstanceState == null) ? "creating" : "re-initializing"));
 
         // if we start this activity, the following must be true:
         // 1) Google Sheets is selected in preferences
         // 2) A google user is selected
 
         // default initializers
-        mAlertMsg = getString(R.string.please_wait);
-        mAlertShowing = false;
+        alertMsg = getString(R.string.please_wait);
+        alertShowing = false;
+        authFailed = false;
 
         setTitle(getString(R.string.send_data));
 
@@ -90,10 +110,10 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
         // resets alert message and showing dialog if the screen is rotated
         if (savedInstanceState != null) {
             if (savedInstanceState.containsKey(ALERT_MSG)) {
-                mAlertMsg = savedInstanceState.getString(ALERT_MSG);
+                alertMsg = savedInstanceState.getString(ALERT_MSG);
             }
             if (savedInstanceState.containsKey(ALERT_SHOWING)) {
-                mAlertShowing = savedInstanceState.getBoolean(ALERT_SHOWING, false);
+                alertShowing = savedInstanceState.getBoolean(ALERT_SHOWING, false);
             }
         }
 
@@ -102,29 +122,34 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
         Intent intent = getIntent();
         selectedInstanceIDs = intent.getLongArrayExtra(FormEntryActivity.KEY_INSTANCES);
 
-        mInstancesToSend = new Long[(selectedInstanceIDs == null) ? 0 : selectedInstanceIDs.length];
+        instancesToSend = new Long[(selectedInstanceIDs == null) ? 0 : selectedInstanceIDs.length];
         if (selectedInstanceIDs != null) {
             for (int i = 0; i < selectedInstanceIDs.length; ++i) {
-                mInstancesToSend[i] = selectedInstanceIDs[i];
+                instancesToSend[i] = selectedInstanceIDs[i];
             }
         }
 
         // at this point, we don't expect this to be empty...
-        if (mInstancesToSend.length == 0) {
-            Log.e(TAG, "onCreate: No instances to upload!");
+        if (instancesToSend.length == 0) {
+            Timber.e("onCreate: No instances to upload!");
             // drop through --
             // everything will process through OK
         } else {
-            Log.i(TAG, "onCreate: Beginning upload of " + mInstancesToSend.length + " instances!");
+            Timber.i("onCreate: Beginning upload of %d instances!", instancesToSend.length);
         }
 
-        runTask();
+        // Initialize credentials and service object.
+        credential = GoogleAccountCredential.usingOAuth2(
+                getApplicationContext(), Collections.singleton(DriveScopes.DRIVE))
+                .setBackOff(new ExponentialBackOff());
+
+        getResultsFromApi();
     }
 
     private void runTask() {
-        mUlTask = (GoogleSheetsInstanceUploaderTask) getLastNonConfigurationInstance();
-        if (mUlTask == null) {
-            mUlTask = new GoogleSheetsInstanceUploaderTask();
+        uiTask = (GoogleSheetsInstanceUploaderTask) getLastCustomNonConfigurationInstance();
+        if (uiTask == null) {
+            uiTask = new GoogleSheetsInstanceUploaderTask(credential);
 
             // ensure we have a google account selected
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
@@ -135,38 +160,170 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
                 return;
             }
 
-            // setup dialog and upload task
             showDialog(PROGRESS_DIALOG);
 
-            mUlTask.setUserName(googleUsername);
-            mUlTask.setUploaderListener(this);
-            mUlTask.execute(mInstancesToSend);
+            uiTask.setUploaderListener(this);
+            uiTask.execute(instancesToSend);
         } else {
             // it's not null, so we have a task running
             // progress dialog is handled by the system
         }
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == GoogleSheetsTask.PLAYSTORE_REQUEST_CODE && resultCode == RESULT_OK) {
-            // the user got sent to the playstore
-            // it returns to this activity, but we'd rather they manually retry
-            // so we finish
-            finish();
-        } else if (requestCode == GoogleSheetsTask.USER_RECOVERABLE_REQUEST_CODE
-                && resultCode == RESULT_OK) {
-            // authorization granted, try again
-            runTask();
-        } else if (requestCode == GoogleSheetsTask.USER_RECOVERABLE_REQUEST_CODE
-                && resultCode == RESULT_CANCELED) {
-            // the user backed out
-            finish();
+    /*
+     * Attempt to call the API, after verifying that all the preconditions are
+     * satisfied. The preconditions are: Google Play Services installed, an
+     * account was selected and the device currently has online access. If any
+     * of the preconditions are not satisfied, the app will prompt the user as
+     * appropriate.
+     */
+    private void getResultsFromApi() {
+        if (credential.getSelectedAccountName() == null) {
+            chooseAccount();
+        } else if (!isDeviceOnline()) {
+            ToastUtils.showShortToast("No network connection available.");
         } else {
-            Log.e(TAG, "unknown request: " + requestCode + " :: result: " + resultCode);
+            runTask();
         }
     }
+
+    /*
+     * Attempts to set the account used with the API credentials. If an account
+     * name was previously saved it will use that one; otherwise an account
+     * picker dialog will be shown to the user. Note that the setting the
+     * account to use with the credentials object requires the app to have the
+     * GET_ACCOUNTS permission, which is requested here if it is not already
+     * present. The AfterPermissionGranted annotation indicates that this
+     * function will be rerun automatically whenever the GET_ACCOUNTS permission
+     * is granted.
+     */
+    @AfterPermissionGranted(REQUEST_PERMISSION_GET_ACCOUNTS)
+    private void chooseAccount() {
+        if (EasyPermissions.hasPermissions(
+                this, Manifest.permission.GET_ACCOUNTS)) {
+            // ensure we have a google account selected
+            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+            String googleUsername = prefs.getString(
+                    PreferenceKeys.KEY_SELECTED_GOOGLE_ACCOUNT, "");
+            if (!googleUsername.equals("")) {
+                credential.setSelectedAccountName(googleUsername);
+                getResultsFromApi();
+            } else {
+                // Start a dialog from which the user can choose an account
+                startActivityForResult(
+                        credential.newChooseAccountIntent(),
+                        REQUEST_ACCOUNT_PICKER);
+            }
+        } else {
+            // Request the GET_ACCOUNTS permission via a user dialog
+            EasyPermissions.requestPermissions(
+                    this,
+                    getString(R.string.request_permissions_google_account),
+                    REQUEST_PERMISSION_GET_ACCOUNTS,
+                    Manifest.permission.GET_ACCOUNTS);
+        }
+    }
+
+
+    /**
+     * Called when an activity launched here (specifically, AccountPicker
+     * and authorization) exits, giving you the requestCode you started it with,
+     * the resultCode it returned, and any additional data from it.
+     *
+     * @param requestCode code indicating which activity result is incoming.
+     * @param resultCode  code indicating the result of the incoming
+     *                    activity result.
+     * @param data        Intent (containing result data) returned by incoming
+     *                    activity result.
+     */
+    @Override
+    protected void onActivityResult(
+            int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        switch (requestCode) {
+            case REQUEST_ACCOUNT_PICKER:
+                if (resultCode == RESULT_OK && data != null && data.getExtras() != null) {
+                    String accountName =
+                            data.getStringExtra(AccountManager.KEY_ACCOUNT_NAME);
+                    if (accountName != null) {
+                        SharedPreferences prefs =
+                                PreferenceManager.getDefaultSharedPreferences(this);
+                        SharedPreferences.Editor editor = prefs.edit();
+                        editor.putString(PreferenceKeys.KEY_SELECTED_GOOGLE_ACCOUNT, accountName);
+                        editor.apply();
+                        credential.setSelectedAccountName(accountName);
+                        getResultsFromApi();
+                    }
+                }
+                break;
+            case REQUEST_AUTHORIZATION:
+                dismissDialog(PROGRESS_DIALOG);
+                if (resultCode == RESULT_OK) {
+                    getResultsFromApi();
+                } else {
+                    Timber.d("AUTHORIZE_DRIVE_ACCESS failed, asking to choose new account:");
+                    finish();
+                }
+                break;
+        }
+    }
+
+    /**
+     * Respond to requests for permissions at runtime for API 23 and above.
+     *
+     * @param requestCode  The request code passed in
+     *                     requestPermissions(android.app.Activity, String, int, String[])
+     * @param permissions  The requested permissions. Never null.
+     * @param grantResults The grant results for the corresponding permissions
+     *                     which is either PERMISSION_GRANTED or PERMISSION_DENIED. Never null.
+     */
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        EasyPermissions.onRequestPermissionsResult(
+                requestCode, permissions, grantResults, this);
+    }
+
+    /**
+     * Callback for when a permission is granted using the EasyPermissions
+     * library.
+     *
+     * @param requestCode The request code associated with the requested
+     *                    permission
+     * @param list        The requested permission list. Never null.
+     */
+    @Override
+    public void onPermissionsGranted(int requestCode, List<String> list) {
+        // Do nothing.
+    }
+
+    /**
+     * Callback for when a permission is denied using the EasyPermissions
+     * library.
+     *
+     * @param requestCode The request code associated with the requested
+     *                    permission
+     * @param list        The requested permission list. Never null.
+     */
+    @Override
+    public void onPermissionsDenied(int requestCode, List<String> list) {
+        // Do nothing.
+    }
+
+    /**
+     * Checks whether the device currently has a network connection.
+     *
+     * @return true if the device has a network connection, false otherwise.
+     */
+    private boolean isDeviceOnline() {
+        ConnectivityManager connMgr =
+                (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo networkInfo = connMgr.getActiveNetworkInfo();
+        return (networkInfo != null && networkInfo.isConnected());
+    }
+
 
     @Override
     protected void onStart() {
@@ -176,11 +333,11 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
 
     @Override
     protected void onResume() {
-        if (mUlTask != null) {
-            mUlTask.setUploaderListener(this);
+        if (uiTask != null) {
+            uiTask.setUploaderListener(this);
         }
-        if (mAlertShowing) {
-            createAlertDialog(mAlertMsg);
+        if (alertShowing) {
+            createAlertDialog(alertMsg);
         }
         super.onResume();
     }
@@ -188,20 +345,20 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
-        outState.putString(ALERT_MSG, mAlertMsg);
-        outState.putBoolean(ALERT_SHOWING, mAlertShowing);
+        outState.putString(ALERT_MSG, alertMsg);
+        outState.putBoolean(ALERT_SHOWING, alertShowing);
     }
 
     @Override
-    public Object onRetainNonConfigurationInstance() {
-        return mUlTask;
+    public Object onRetainCustomNonConfigurationInstance() {
+        return uiTask;
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        if (mAlertDialog != null && mAlertDialog.isShowing()) {
-            mAlertDialog.dismiss();
+        if (alertDialog != null && alertDialog.isShowing()) {
+            alertDialog.dismiss();
         }
     }
 
@@ -213,8 +370,8 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
 
     @Override
     protected void onDestroy() {
-        if (mUlTask != null) {
-            mUlTask.setUploaderListener(null);
+        if (uiTask != null) {
+            uiTask.setUploaderListener(null);
         }
         super.onDestroy();
     }
@@ -231,15 +388,20 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
             // probably got an auth request, so ignore
             return;
         }
-        Log.i(TAG, "uploadingComplete: Processing results (" + result.size() + ") from upload of "
-                + mInstancesToSend.length + " instances!");
+        Timber.i("uploadingComplete: Processing results ( %d ) from upload of %d instances!",
+                result.size(), instancesToSend.length);
 
         StringBuilder selection = new StringBuilder();
         Set<String> keys = result.keySet();
         StringBuilder message = new StringBuilder();
 
         if (keys.size() == 0) {
-            message.append(getString(R.string.no_forms_uploaded));
+            if (authFailed) {
+                message.append(getString(R.string.google_auth_io_exception_msg));
+                authFailed = false;
+            } else {
+                message.append(getString(R.string.no_forms_uploaded));
+            }
         } else {
             Iterator<String> it = keys.iterator();
 
@@ -266,7 +428,12 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
                         message.append(name).append(" - ").append(result.get(id)).append("\n\n");
                     }
                 } else {
-                    message.append(getString(R.string.no_forms_uploaded));
+                    if (authFailed) {
+                        message.append(getString(R.string.google_auth_io_exception_msg));
+                        authFailed = false;
+                    } else {
+                        message.append(getString(R.string.no_forms_uploaded));
+                    }
                 }
             } finally {
                 if (results != null) {
@@ -279,8 +446,8 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
 
     @Override
     public void progressUpdate(int progress, int total) {
-        mAlertMsg = getString(R.string.sending_items, String.valueOf(progress), String.valueOf(total));
-        mProgressDialog.setMessage(mAlertMsg);
+        alertMsg = getString(R.string.sending_items, String.valueOf(progress), String.valueOf(total));
+        progressDialog.setMessage(alertMsg);
     }
 
     @Override
@@ -290,7 +457,7 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
                 Collect.getInstance().getActivityLogger()
                         .logAction(this, "onCreateDialog.PROGRESS_DIALOG", "show");
 
-                mProgressDialog = new ProgressDialog(this);
+                progressDialog = new ProgressDialog(this);
                 DialogInterface.OnClickListener loadingButtonListener =
                         new DialogInterface.OnClickListener() {
                             @Override
@@ -299,18 +466,18 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
                                         .logAction(this, "onCreateDialog.PROGRESS_DIALOG",
                                                 "cancel");
                                 dialog.dismiss();
-                                mUlTask.cancel(true);
-                                mUlTask.setUploaderListener(null);
+                                uiTask.cancel(true);
+                                uiTask.setUploaderListener(null);
                                 finish();
                             }
                         };
-                mProgressDialog.setTitle(getString(R.string.uploading_data));
-                mProgressDialog.setMessage(mAlertMsg);
-                mProgressDialog.setIndeterminate(true);
-                mProgressDialog.setProgressStyle(ProgressDialog.STYLE_SPINNER);
-                mProgressDialog.setCancelable(false);
-                mProgressDialog.setButton(getString(R.string.cancel), loadingButtonListener);
-                return mProgressDialog;
+                progressDialog.setTitle(getString(R.string.uploading_data));
+                progressDialog.setMessage(alertMsg);
+                progressDialog.setIndeterminate(true);
+                progressDialog.setProgressStyle(ProgressDialog.STYLE_SPINNER);
+                progressDialog.setCancelable(false);
+                progressDialog.setButton(getString(R.string.cancel), loadingButtonListener);
+                return progressDialog;
             case GOOGLE_USER_DIALOG:
                 AlertDialog.Builder gudBuilder = new AlertDialog.Builder(this);
 
@@ -331,9 +498,9 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
     private void createAlertDialog(String message) {
         Collect.getInstance().getActivityLogger().logAction(this, "createAlertDialog", "show");
 
-        mAlertDialog = new AlertDialog.Builder(this).create();
-        mAlertDialog.setTitle(getString(R.string.upload_results));
-        mAlertDialog.setMessage(message);
+        alertDialog = new AlertDialog.Builder(this).create();
+        alertDialog.setTitle(getString(R.string.upload_results));
+        alertDialog.setMessage(message);
         DialogInterface.OnClickListener quitListener = new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface dialog, int i) {
@@ -342,26 +509,44 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
                         Collect.getInstance().getActivityLogger()
                                 .logAction(this, "createAlertDialog", "OK");
                         // always exit this activity since it has no interface
-                        mAlertShowing = false;
+                        alertShowing = false;
                         finish();
                         break;
                 }
             }
         };
-        mAlertDialog.setCancelable(false);
-        mAlertDialog.setButton(getString(R.string.ok), quitListener);
-        mAlertDialog.setIcon(android.R.drawable.ic_dialog_info);
-        mAlertShowing = true;
-        mAlertMsg = message;
-        mAlertDialog.show();
+        alertDialog.setCancelable(false);
+        alertDialog.setButton(getString(R.string.ok), quitListener);
+        alertDialog.setIcon(android.R.drawable.ic_dialog_info);
+        alertShowing = true;
+        alertMsg = message;
+        alertDialog.show();
     }
 
-    public class GoogleSheetsInstanceUploaderTask extends
-            GoogleSheetsAbstractUploader<Long, Integer, HashMap<String, String>> {
+    @Override
+    public void authRequest(Uri url, HashMap<String, String> doneSoFar) {
+        // in interface, but not needed
+    }
+
+    private class GoogleSheetsInstanceUploaderTask extends
+            GoogleSheetsAbstractUploader {
+
+        GoogleSheetsInstanceUploaderTask(GoogleAccountCredential credential) {
+            HttpTransport transport = AndroidHttp.newCompatibleTransport();
+            JsonFactory jsonFactory = JacksonFactory.getDefaultInstance();
+            sheetsService = new com.google.api.services.sheets.v4.Sheets.Builder(
+                    transport, jsonFactory, credential)
+                    .setApplicationName("ODK-Collect")
+                    .build();
+            driveService = new com.google.api.services.drive.Drive.Builder(
+                    transport, jsonFactory, credential)
+                    .setApplicationName("ODK-Collect")
+                    .build();
+        }
 
         @Override
         protected HashMap<String, String> doInBackground(Long... values) {
-            mResults = new HashMap<String, String>();
+            results = new HashMap<>();
 
             String selection = InstanceColumns._ID + "=?";
             String[] selectionArgs = new String[(values == null) ? 0 : values.length];
@@ -373,50 +558,25 @@ public class GoogleSheetsUploaderActivity extends Activity implements InstanceUp
                     selectionArgs[i] = values[i].toString();
                 }
             }
-
             String token;
             try {
-                token = authenticate(GoogleSheetsUploaderActivity.this, mGoogleUserName);
-            } catch (IOException e) {
-                // network or server error, the call is expected to succeed if
-                // you try again later. Don't attempt to call again immediately
-                // - the request is likely to fail, you'll hit quotas or
-                // back-off.
-                e.printStackTrace();
-                mResults.put("0", oauth_fail + e.getMessage());
-                return mResults;
-            } catch (GooglePlayServicesAvailabilityException playEx) {
-                Dialog alert = GooglePlayServicesUtil.getErrorDialog(
-                        playEx.getConnectionStatusCode(), GoogleSheetsUploaderActivity.this,
-                        PLAYSTORE_REQUEST_CODE);
-                alert.show();
-                return null;
+                token = credential.getToken();
+                //Immediately invalidate so we get a different one if we have to try again
+                GoogleAuthUtil.invalidateToken(GoogleSheetsUploaderActivity.this, token);
+
+                getIDOfFolderWithName(GOOGLE_DRIVE_ROOT_FOLDER, null);
+                uploadInstances(selection, selectionArgs, token);
             } catch (UserRecoverableAuthException e) {
-                GoogleSheetsUploaderActivity.this.startActivityForResult(e.getIntent(),
-                        USER_RECOVERABLE_REQUEST_CODE);
-                e.printStackTrace();
-                return null;
-            } catch (GoogleAuthException e) {
-                // Failure. The call is not expected to ever succeed so it
-                // should not be retried.
-                e.printStackTrace();
-                mResults.put("0", oauth_fail + e.getMessage());
-                return mResults;
+                results = null;
+                startActivityForResult(e.getIntent(), REQUEST_AUTHORIZATION);
+            } catch (IOException | GoogleAuthException e) {
+                Timber.e(e);
+                authFailed = true;
+            } catch (MultipleFoldersFoundException e) {
+                Timber.e(e);
             }
-
-            if (token == null) {
-                // if token is null,
-                return null;
-            }
-
-            uploadInstances(selection, selectionArgs, token);
-            return mResults;
+            return results;
         }
-    }
 
-    @Override
-    public void authRequest(Uri url, HashMap<String, String> doneSoFar) {
-        // in interface, but not needed
     }
-
 }

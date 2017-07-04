@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009 University of Washington
+ * Copyright (C) 2017 University of Washington
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -14,83 +14,66 @@
 
 package org.odk.collect.android.activities;
 
-import android.app.TabActivity;
-import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Bundle;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.LinearLayout;
-import android.widget.TabHost;
-import android.widget.TabWidget;
-import android.widget.TextView;
+import android.support.v4.app.Fragment;
+import android.support.v4.view.ViewPager;
+import android.support.v7.app.AppCompatActivity;
+import android.support.v7.widget.Toolbar;
 
 import org.odk.collect.android.R;
+import org.odk.collect.android.adapters.ViewPagerAdapter;
 import org.odk.collect.android.application.Collect;
+import org.odk.collect.android.fragments.DataManagerList;
+import org.odk.collect.android.fragments.FormManagerList;
+import org.odk.collect.android.views.SlidingTabLayout;
 
-/**
- * An example of tab content that launches an activity via
- * {@link android.widget.TabHost.TabSpec#setContent(android.content.Intent)}
- */
-public class FileManagerTabs extends TabActivity {
+import java.util.ArrayList;
 
-    private static final String FORMS_TAB = "forms_tab";
-    private static final String DATA_TAB = "data_tab";
+public class FileManagerTabs extends AppCompatActivity {
+
+    private DataManagerList dataManagerList = DataManagerList.newInstance();
+    private FormManagerList formManagerList = FormManagerList.newInstance();
+
+    private void initToolbar() {
+        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
+        setTitle(getString(R.string.manage_files));
+        setSupportActionBar(toolbar);
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        setTitle(getString(R.string.manage_files));
+        setContentView(R.layout.file_manager_layout);
+        initToolbar();
 
-        final TabHost tabHost = getTabHost();
-        tabHost.getTabWidget().setBackgroundColor(Color.DKGRAY);
+        String[] tabNames = {getString(R.string.data), getString(R.string.forms)};
+        // Get the ViewPager and set its PagerAdapter so that it can display items
+        ViewPager viewPager = (ViewPager) findViewById(R.id.pager);
 
-        Intent remote = new Intent(this, DataManagerList.class);
-        tabHost.addTab(tabHost
-                .newTabSpec(DATA_TAB)
-                .setIndicator(getString(R.string.data))
-                .setContent(remote));
+        ArrayList<Fragment> fragments = new ArrayList<>();
+        fragments.add(dataManagerList);
+        fragments.add(formManagerList);
 
-        Intent local = new Intent(this, FormManagerList.class);
-        tabHost.addTab(tabHost
-                .newTabSpec(FORMS_TAB)
-                .setIndicator(getString(R.string.forms))
-                .setContent(local));
+        viewPager.setAdapter(new ViewPagerAdapter(
+                getSupportFragmentManager(), tabNames, fragments));
 
-        // hack to set font size
-        LinearLayout ll = (LinearLayout) tabHost.getChildAt(0);
-        TabWidget tw = (TabWidget) ll.getChildAt(0);
-
-        int fontsize = Collect.getQuestionFontsize();
-
-        ViewGroup rllf = (ViewGroup) tw.getChildAt(0);
-        TextView savedFormTab = getTextViewChild(rllf);
-        if (savedFormTab != null) {
-            savedFormTab.setTextSize(fontsize);
-            savedFormTab.setTextColor(Color.WHITE);
-            savedFormTab.setPadding(0, 0, 0, 6);
-            savedFormTab.setSingleLine();
-        }
-
-        ViewGroup rlrf = (ViewGroup) tw.getChildAt(1);
-        TextView blankFormTab = getTextViewChild(rlrf);
-        if (blankFormTab != null) {
-            blankFormTab.setTextSize(fontsize);
-            blankFormTab.setTextColor(Color.WHITE);
-            blankFormTab.setPadding(0, 0, 0, 6);
-            blankFormTab.setSingleLine();
-        }
+        // Give the SlidingTabLayout the ViewPager
+        SlidingTabLayout slidingTabLayout = (SlidingTabLayout) findViewById(R.id.tabs);
+        // Attach the view pager to the tab strip
+        slidingTabLayout.setDistributeEvenly(true);
+        slidingTabLayout.setFontColor(android.R.color.white);
+        slidingTabLayout.setBackgroundColor(Color.DKGRAY);
+        slidingTabLayout.setViewPager(viewPager);
     }
 
-    private TextView getTextViewChild(ViewGroup viewGroup) {
-        for (int i = 0; i < viewGroup.getChildCount(); i++) {
-            View view = viewGroup.getChildAt(i);
-            if (view instanceof TextView) {
-                return (TextView) view;
-            }
-        }
-        return null;
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
+        toolbar.setNavigationIcon(R.drawable.notes);
     }
 
     @Override
@@ -103,6 +86,15 @@ public class FileManagerTabs extends TabActivity {
     protected void onStop() {
         Collect.getInstance().getActivityLogger().logOnStop(this);
         super.onStop();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (dataManagerList.getDrawerStatus()) {
+            dataManagerList.setUserVisibleHint(false);
+        } else {
+            super.onBackPressed();
+        }
     }
 
 }
